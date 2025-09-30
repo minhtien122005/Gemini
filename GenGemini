@@ -1,0 +1,113 @@
+# Make by: Nguyễn Minh Tiến, 31231020122, Robot&Ai K49
+# Cài đặt thư viện cần thiết của Google
+!pip install -q -U google-generativeai
+
+import google.generativeai as genai
+from PIL import Image
+import io
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import json
+import re
+
+# --- Giao diện người dùng ---
+api_key_input = widgets.Password(description='Nhập API Key:', placeholder='Dán API Key của bạn vào đây', layout=widgets.Layout(width='500px'))
+uploader_id = widgets.FileUpload(description='1. Tải lên Giấy tờ', button_style='primary')
+uploader_contract = widgets.FileUpload(description='2. Tải lên Hợp đồng', button_style='primary')
+process_button = widgets.Button(description='3. Trích xuất & Điền thông tin', button_style='success', icon='cogs')
+output_area = widgets.Output()
+
+# --- Hàm xử lý chính ---
+def process_images(b):
+    with output_area:
+        clear_output()
+
+        # Bước 0: Cấu hình API và kiểm tra file
+        try:
+            genai.configure(api_key=api_key_input.value)
+            model = genai.GenerativeModel("models/gemini-2.0-flash")
+        except Exception as e:
+            print(f"❌ Lỗi API Key: Vui lòng kiểm tra lại. Chi tiết: {e}")
+            return
+
+        if not uploader_id.value or not uploader_contract.value:
+            print("⚠️ Vui lòng tải lên cả hai tệp.")
+            return
+
+        print("🔄 Bắt đầu xử lý...")
+        
+        # Lấy nội dung ảnh dưới dạng bytes
+        id_content = next(iter(uploader_id.value.values()))['content']
+        contract_content = next(iter(uploader_contract.value.values()))['content']
+        
+        # Chuyển đổi ảnh sang định dạng PIL để AI xử lý
+        id_image = Image.open(io.BytesIO(id_content))
+        contract_image = Image.open(io.BytesIO(contract_content))
+
+        # === (MỚI) Hiển thị hình ảnh đã tải lên ===
+        print("\n--- Hình ảnh đã tải lên ---")
+        id_image_widget = widgets.Image(value=id_content, width=350, format='png')
+        contract_image_widget = widgets.Image(value=contract_content, width=350, format='png')
+        display(widgets.HBox([id_image_widget, contract_image_widget]))
+        # ==========================================
+
+        try:
+            # === BƯỚC 1A: Trích xuất và hiển thị TOÀN BỘ thông tin chi tiết từ giấy tờ ===
+            print("\n📄 Đang đọc toàn bộ thông tin từ giấy tờ...")
+            prompt_full_details = "Hãy trích xuất tất cả các trường thông tin bạn thấy trên giấy tờ này và trả về dưới dạng một đối tượng JSON. Sử dụng tiếng Việt cho các key."
+            response_full_details = model.generate_content([prompt_full_details, id_image])
+            full_details_data = json.loads(response_full_details.text.strip().replace('```json', '').replace('```', ''))
+            
+            print("\n" + "-"*15 + " THÔNG TIN CHI TIẾT TRÊN GIẤY TỜ " + "-"*15)
+            for key, value in full_details_data.items():
+                print(f"- {key.replace('_', ' ').title()}: {value}")
+            print("-" * 55)
+
+            # === BƯỚC 1B & 2: Trích xuất thông tin CẦN THIẾT cho hợp đồng ===
+            print("\n📑 Đang trích xuất thông tin cần thiết để điền vào hợp đồng...")
+            prompt_id_for_contract = 'Trích xuất "Passport No." (dưới key "so_id"), gộp "Surname" và "Given names" (dưới key "ho_ten"), "Date of birth" (dưới key "ngay_sinh") từ ảnh. Chỉ trả về JSON.'
+            response_id = model.generate_content([prompt_id_for_contract, id_image])
+            id_data = json.loads(response_id.text.strip().replace('```json', '').replace('```', ''))
+            print(f"✅ Đã lấy thông tin cần thiết: {id_data.get('ho_ten')}")
+
+            prompt_contract = "Trích xuất toàn bộ nội dung văn bản từ hình ảnh hợp đồng này."
+            response_contract = model.generate_content([prompt_contract, contract_image])
+            contract_text = response_contract.text
+            print("✅ Đã trích xuất văn bản hợp đồng.")
+
+        except Exception as e:
+            print(f"❌ Lỗi trong quá trình trích xuất: {e}")
+            return
+            
+        # === BƯỚC 3: Điền thông tin vào hợp đồng ===
+        print("\n✍️  Đang điền thông tin vào hợp đồng...")
+        ho_ten = id_data.get("ho_ten", "")
+        so_id = id_data.get("so_id", "")
+        ngay_sinh = id_data.get("ngay_sinh", "")
+
+        replacements = {
+            r'(Địa chỉ\s*:\s*)': rf'\1(Không có trên giấy tờ)',
+            r'(Điện thoại\s*:\s*)': rf'\1(Không có trên giấy tờ)',
+            r'(Đại diện\s*:\s*)': rf'\1{ho_ten}'
+        }
+
+        filled_contract_text = contract_text
+        for pattern, replacement in replacements.items():
+            filled_contract_text = re.sub(pattern, replacement, filled_contract_text, flags=re.IGNORECASE)
+
+        if ho_ten:
+            detailed_info = f"{ho_ten}\nSố hộ chiếu: {so_id}\nNgày sinh: {ngay_sinh}"
+            filled_contract_text = filled_contract_text.replace(ho_ten, detailed_info, 1)
+
+        print("✅ Hoàn tất!")
+
+        # === HIỂN THỊ KẾT QUẢ CUỐI CÙNG ===
+        print("\n" + "="*50)
+        print(" KẾT QUẢ HỢP ĐỒNG ĐÃ ĐƯỢC ĐIỀN TỰ ĐỘNG ")
+        print("="*50 + "\n")
+        print(filled_contract_text)
+
+# --- Hiển thị giao diện và gán sự kiện ---
+process_button.on_click(process_images)
+upload_buttons = widgets.HBox([uploader_id, uploader_contract])
+display(api_key_input, upload_buttons, process_button, output_area)
